@@ -3,6 +3,7 @@ from google.cloud import securitycenter
 from google.cloud.securitycenter_v1 import CreateFindingRequest, Finding, SourcePropertiesEntry
 import datetime
 import json
+import uuid
 from os import getenv
 
 class LockdownFinding:
@@ -17,13 +18,33 @@ class LockdownFinding:
     notification.send(finding)
 
     """
-    def __init__(self, finding_type, state, message, resource_id, event_time):
-        self.finding_type = finding_type
-        self.state = state
-        self.message = message
-        self.resource_id = resource_id
-        self.event_time = event_time  
+    def __init__(self, finding_type, state="ACTIVE", message, resource_id, event_time):
 
+        # Finding type will show as all caps finding in SCC
+        self.finding_type = finding_type
+
+        # state can be ACTIVE or INACTIVE
+        if state.lower() == "active":
+            self.state = Finding.State.ACTIVE
+        else:
+            self.set_finding_inactive()
+
+        # Message is an extra attribute stored in sourceProperties
+        self.message = message
+
+        # full path of the resource for easy clicking in SCC
+        self.resource_id = resource_id
+
+        # Log event date
+        self.event_time = event_time
+
+        # Create a unique finding ID
+        self.finding_id = uuid.uuid4().replace("-", "")
+
+    def set_finding_inactive():
+        self.state = Finding.State.INACTIVE
+
+    # Properties for easy retrieval e.g. LockdownFinding.finding_type
     @property
     def finding_type():
         return self.finding_type
@@ -44,6 +65,7 @@ class LockdownFinding:
     def event_time():
         return self.event_time
 
+    # Normalized message that can be sent to a pubsub topic
     @property
     def pubsub_message_contents():
         return {
@@ -87,8 +109,10 @@ class Notify:
         data = message_json.encode("utf-8")
         
         # Publish message
-        self.pub_client.publish(topic, data)
-
+        try:
+            self.pub_client.publish(topic, data)
+        except:
+            raise
 
     def scc(self, lockdown_finding):
         """
@@ -101,7 +125,7 @@ class Notify:
 
         # Create a finding object
         finding = Finding(
-            state=Finding.State.ACTIVE,
+            state=lockdown_finding.state,
             resource_name=lockdown_finding.resource_id,
             category=lockdown_finding.finding_type,
             event_time=lockdown_finding.event_time,
@@ -111,14 +135,17 @@ class Notify:
         # Request object to send to SCC
         request = CreateFindingRequest(
             parent=self.source,
-            finding_id=finding_id,
+            finding_id=lockdown_finding.finding_id,
             finding=finding,
         )
 
         # Call The API.
-        created_finding = self.scc_client.create_finding(
-            request=request
-        )
+        try:
+            created_finding = self.scc_client.create_finding(
+                request=request
+            )
+        except:
+            raise
 
     def send(self, lockdown_finding):
         """
