@@ -8,8 +8,9 @@ from googleapiclient.discovery_cache.base import Cache
 import googleapiclient.discovery
 
 from lockdown_logging import create_logger # pylint: disable=import-error
-from lockdown_pubsub import publish_message # pylint: disable=import-error
+# from lockdown_pubsub import publish_message # pylint: disable=import-error
 from lockdown_checklist import check_list # pylint: disable=import-error
+from lockdown_notify import LockdownFinding, Notify # pylint: disable=import-error
 
 def pubsub_trigger(data, context):
     """
@@ -50,11 +51,12 @@ def check_resource(project_id, firewall_name):
     except:
         logging.error('Mode not found in environment variable.')
     
-    # Determine alerting Pub/Sub topic
+    # Determine alerting method and create the Notification method class
     try:
-        topic_id = getenv('TOPIC_ID')
+        alerting_method = getenv("NOTIFICATION_METHOD")
+        notify = Notify(alerting_method)
     except:
-        logging.error('Topic ID not found in environment variable.')
+        logging.error('Notification method not found in environment variable.')
 
     # Create compute client to make API calls
     compute_client = create_service()
@@ -68,23 +70,32 @@ def check_resource(project_id, firewall_name):
 
     if ('0.0.0.0/0' in source_ranges and not disabled):
         finding_type = "public_firewall_port"
-        # Set our pub/sub message
+
+        # Create an active finding
         message = f"Found 0.0.0.0/0 ingress on enabled firewall rule: {firewall_name} in project: {project_id}."
-        # Publish message to Pub/Sub
-        logging.info(f'Publishing message to Pub/Sub.')
-        try:
-            logging.info(message)
-            publish_message(finding_type, mode, firewall_name, project_id, message, topic_id)
-            logging.info(f'Published message to {topic_id}')
-        except:
-            logging.error(f'Could not publish message to {topic_id}')
-            raise
+        finding = LockdownFinding(
+            finding_type="FIREWALL_GLOBAL_ALLOW",
+            message=message,
+            resource_id=,
+            event_time=
+            )
+
         if mode == "write":
             logging.info(f"Lockdown is in write mode. Disabling firewall rule: {firewall_name}.")
-            # Disables the firewall rule
-            disable_firewall(compute_client, firewall_name, project_id)
+            try:
+                # Disables the firewall rule, if successful, set the finding to inactive before notifying.
+                disable_firewall(compute_client, firewall_name, project_id)
+                finding.set_finding_inactive
+            except Exception as error:
+                # if we get an error disabling the firewall, still send the finding to the notify endpoint
+                logging.error(f"Unable to disable firewall: {firewall_name}. Recieved error: {error}")
+                notify.send(finding)
         if mode == "read":
             logging.info('Lockdown is in read-only mode. Taking no action.')
+        try:
+            notify.send(finding)
+        except:
+            logging.error(f"Error sending notification for finding: {finding.pubsub_message_contents}  Recieved error: {error}")
     else:
         logging.info(f"The firewall rule: {firewall_name} is not enabled or 0.0.0.0/0 was removed.")
 
